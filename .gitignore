@@ -1,0 +1,12 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local data and generated training artifacts
+dataset/*
+!dataset/README.md
+.DS_Store
