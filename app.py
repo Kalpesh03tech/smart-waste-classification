@@ -8,8 +8,9 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 from tensorflow import keras
 
 # Configuration
-MODEL_PATH = os.path.join("models", "best_model.keras")
-CLASS_NAMES_PATH = os.path.join("models", "class_names.json")
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(PROJECT_DIR, "models", "best_model.keras")
+CLASS_NAMES_PATH = os.path.join(PROJECT_DIR, "models", "class_names.json")
 IMG_SIZE = (224, 224)
 
 # Confidence threshold
@@ -63,16 +64,34 @@ def load_model():
         st.error(f"**Failed to load model:** {exc}")
         st.stop()
 
-    # Load class names
+    # Load class names and ensure they match the model output.
     if os.path.exists(CLASS_NAMES_PATH):
-        with open(CLASS_NAMES_PATH) as f:
-            class_names = json.load(f)
+        try:
+            with open(CLASS_NAMES_PATH, encoding="utf-8") as f:
+                class_names = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            st.error(f"**Could not read class labels** from `{CLASS_NAMES_PATH}`: {exc}")
+            st.stop()
     else:
         class_names = DEFAULT_CLASS_NAMES
         st.warning(
             f"`{CLASS_NAMES_PATH}` not found — using default class order: {class_names}. "
             "Re-run training to generate this file."
         )
+
+    output_shape = model.output_shape
+    output_count = output_shape[-1] if isinstance(output_shape, tuple) else None
+    if (
+        not isinstance(class_names, list)
+        or not all(isinstance(name, str) and name for name in class_names)
+        or len(set(class_names)) != len(class_names)
+        or output_count != len(class_names)
+    ):
+        st.error(
+            "The class label file does not match the model outputs. "
+            "Expected one unique, non-empty class name for each model output."
+        )
+        st.stop()
 
     return model, class_names
 
@@ -160,7 +179,7 @@ def main():
 
             is_uncertain = confidence < CONFIDENCE_THRESHOLD
 
-            #Results
+            # Results
             if is_uncertain:
                 st.warning(
                     f"⚠️ **Uncertain prediction.** The model's highest confidence "
@@ -184,7 +203,7 @@ def main():
                 for i, name in enumerate(class_names):
                     st.progress(float(probs[i]), text=f"{name.capitalize()}: {probs[i]:.1%}")
 
-            #Disposal guidance
+            # Disposal guidance
             st.divider()
             if is_uncertain:
                 st.markdown(

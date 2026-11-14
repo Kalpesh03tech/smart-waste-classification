@@ -64,10 +64,10 @@ Improper waste segregation significantly impedes recycling operations, increases
 ```mermaid
 flowchart TD
     A[User Uploads Image] --> B[Streamlit Web App]
-    B --> C[Image Preprocessing & Validation\n224x224 RGB, [-1, 1] Range]
+    B --> C["Image preprocessing and validation<br/>224 x 224 RGB, values from -1 to 1"]
     C --> D[MobileNetV2 Deep Learning Model]
     D --> E[Softmax Output Probabilities]
-    E --> F{Confidence >= 60%?}
+    E --> F{"Confidence at least 60%?"}
     F -- Yes --> G[Display Predicted Class & Confidence]
     G --> H[Show Probability Distribution Breakdown]
     H --> I[Display Actionable Disposal / Recycling Guidance]
@@ -85,7 +85,8 @@ Smart Waste Classification/
 ├── train.py                   # Complete training, fine-tuning & evaluation pipeline
 ├── requirements.txt           # Project dependencies
 ├── README.md                  # Detailed documentation and user guide
-├── dataset/                   # Add your own class-organized training images
+├── dataset/                   # Instructions for adding your own training images
+│   └── README.md
 └── models/                    # Saved model artifacts & metrics
     ├── best_model.keras       # Trained Keras model checkpoint (HDF5/Keras 3)
     ├── class_names.json       # Exported class labels mapping
@@ -107,9 +108,9 @@ The original training images are not included in this repository. To retrain the
 | **Total** | Multi-class domestic waste | **~1,987** | **100%** |
 
 ### Data Splitting Strategy:
-1. **85%** allocated to Training + Validation, **15%** strictly held out for Test evaluation.
-2. The 85% partition is sub-divided into approximately **70% Training** and **15% Validation**.
-3. Deterministic caching and fixed random seed (`seed=42`) ensure reproducible splits across runs.
+1. Images are split into approximately **70% Training**, **15% Validation**, and **15% Test**.
+2. Splits are stratified so each partition includes examples from every class.
+3. A fixed random seed (`seed=42`) makes the split reproducible.
 
 ---
 
@@ -162,9 +163,9 @@ Dense (4 units, Softmax activation)
 
 ## 💻 Installation & Setup
 
-### 1. Clone or Navigate to the Repository
+### 1. Clone the Repository
 ```bash
-git clone <repository-url>
+git clone https://github.com/Kalpesh03tech/smart-waste-classification.git
 cd smart-waste-classification
 ```
 
@@ -223,9 +224,9 @@ Network URL: http://<your-local-ip>:8501
 
 ---
 
-### 2. Training the Model from Scratch
+### 2. Training the Model
 
-If you wish to retrain the neural network on the current dataset or a custom dataset:
+If you wish to retrain the neural network on your own dataset:
 
 ```bash
 python train.py --data_dir dataset/
@@ -288,7 +289,7 @@ This failsafe prevents items like hazardous materials, ceramics, or multi-layer 
 ## 🔧 Troubleshooting & FAQs
 
 ### Q1: `Model file not found at models/best_model.keras`
-> **Solution**: You need to train the model first by running `python train.py --data_dir dataset/` or verify that the pre-trained `.keras` file exists in the `models/` directory.
+> **Solution**: Confirm that `models/best_model.keras` exists in the cloned repository. If it was removed, retrain using `python train.py --data_dir dataset/` and a prepared dataset.
 
 ### Q2: Double Normalization warning or low accuracy during inference
 > **Solution**: `app.py` automatically checks whether the loaded model includes internal preprocessing layers before applying `keras.applications.mobilenet_v2.preprocess_input`. Ensure you keep `train.py` and `app.py` matching.
@@ -316,8 +317,3 @@ This failsafe prevents items like hazardous materials, ceramics, or multi-layer 
 ## 📄 License
 
 This project is open-source and distributed under the [MIT License](LICENSE). Contributions, bug reports, and pull requests are welcome!
-
-
-source .venv/bin/activate
-
-streamlit run app.py

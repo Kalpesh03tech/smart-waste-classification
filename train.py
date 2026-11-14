@@ -6,6 +6,7 @@ import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend — safe for headless servers
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Suppress TF info/warning noise
@@ -17,9 +18,11 @@ from tensorflow.keras import layers
 IMG_SIZE = (224, 224)
 CLASS_NAMES = ["glass", "metal", "paper", "plastic"]  # Alphabetical — matches tf.keras.utils.image_dataset_from_directory default
 NUM_CLASSES = len(CLASS_NAMES)
-MODEL_DIR = "models"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(PROJECT_DIR, "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "best_model.keras")
 CLASS_NAMES_PATH = os.path.join(MODEL_DIR, "class_names.json")
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
 
 
 def parse_args():
@@ -36,72 +39,82 @@ def parse_args():
                         help="Learning rate for fine-tuning phase (default: 1e-5)")
     parser.add_argument("--fine_tune_epochs", type=int, default=10,
                         help="Additional epochs for fine-tuning (default: 10)")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.epochs < 1 or args.fine_tune_epochs < 0 or args.batch_size < 1:
+        parser.error("--epochs and --batch_size must be positive; --fine_tune_epochs cannot be negative")
+    if args.learning_rate <= 0 or args.fine_tune_lr <= 0:
+        parser.error("learning rates must be positive")
+    return args
 
 # Data loading
 def load_datasets(data_dir: str, batch_size: int):
-    # Step 1: 85/15 split → train_val / test
-    train_val_ds = keras.utils.image_dataset_from_directory(
-        data_dir,
-        labels="inferred",
-        label_mode="int",
-        class_names=CLASS_NAMES,
-        image_size=IMG_SIZE,
-        batch_size=batch_size,
-        shuffle=True,
-        seed=42,
-        validation_split=0.15,
-        subset="training",
+    """Create deterministic, stratified train/validation/test datasets."""
+    paths, labels = [], []
+    for class_index, class_name in enumerate(CLASS_NAMES):
+        class_dir = Path(data_dir) / class_name
+        class_paths = sorted(
+            path for path in class_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        )
+        paths.extend(str(path) for path in class_paths)
+        labels.extend([class_index] * len(class_paths))
+
+    if not paths:
+        sys.exit(f"ERROR: No supported image files found in '{data_dir}'.")
+
+    paths = np.asarray(paths)
+    labels = np.asarray(labels, dtype=np.int32)
+    try:
+        train_val_paths, test_paths, train_val_labels, test_labels = train_test_split(
+            paths, labels, test_size=0.15, random_state=42, stratify=labels
+        )
+        train_paths, val_paths, train_labels, val_labels = train_test_split(
+            train_val_paths, train_val_labels, test_size=(0.15 / 0.85),
+            random_state=42, stratify=train_val_labels
+        )
+    except ValueError as exc:
+        sys.exit(
+            "ERROR: Not enough examples in each class for a stratified "
+            f"train/validation/test split: {exc}"
+        )
+
+    def decode_and_resize(path, label):
+        image = tf.io.read_file(path)
+        image = tf.io.decode_image(image, channels=3, expand_animations=False)
+        image.set_shape([None, None, 3])
+        image = tf.image.resize(image, IMG_SIZE)
+        return image, label
+
+    def make_dataset(image_paths, image_labels, shuffle=False):
+        dataset = tf.data.Dataset.from_tensor_slices((image_paths, image_labels))
+        if shuffle:
+            dataset = dataset.shuffle(
+                len(image_paths), seed=42, reshuffle_each_iteration=True
+            )
+        return (
+            dataset.map(decode_and_resize, num_parallel_calls=tf.data.AUTOTUNE)
+            .batch(batch_size)
+        )
+
+    train_ds = make_dataset(train_paths, train_labels, shuffle=True)
+    val_ds = make_dataset(val_paths, val_labels)
+    test_ds = make_dataset(test_paths, test_labels)
+    print(
+        f"Data split (images): train={len(train_paths)}, "
+        f"validation={len(val_paths)}, test={len(test_paths)}"
     )
-
-    test_ds = keras.utils.image_dataset_from_directory(
-        data_dir,
-        labels="inferred",
-        label_mode="int",
-        class_names=CLASS_NAMES,
-        image_size=IMG_SIZE,
-        batch_size=batch_size,
-        shuffle=True,
-        seed=42,
-        validation_split=0.15,
-        subset="validation",
-    )
-
-    # Step 2: Sub-split train_val → train / val 
-    total_batches = tf.data.experimental.cardinality(train_val_ds).numpy()
-    val_batches = max(1, int(total_batches * 0.176))
-    train_batches = total_batches - val_batches
-
-    # Cache dataset to ensure consistent deterministic partition between train and val
-    cached_train_val = train_val_ds.cache()
-    val_ds = cached_train_val.take(val_batches)
-    train_ds = cached_train_val.skip(val_batches)
-
-    print(f"Data split (batches): train={train_batches}, val={val_batches}, "
-          f"test={tf.data.experimental.cardinality(test_ds).numpy()}")
-
-    return train_ds, val_ds, test_ds, CLASS_NAMES
+    return train_ds, val_ds, test_ds, CLASS_NAMES, train_labels
 
 
-def compute_class_weights(data_dir: str):
-    """Compute class weights inversely proportional to sample counts."""
-    counts = []
-    for cls in CLASS_NAMES:
-        cls_dir = os.path.join(data_dir, cls)
-        if not os.path.isdir(cls_dir):
-            print(f"WARNING: class folder '{cls_dir}' not found — check your dataset structure.")
-            counts.append(0)
-        else:
-            n = len([f for f in os.listdir(cls_dir)
-                     if os.path.isfile(os.path.join(cls_dir, f))])
-            counts.append(n)
-    counts = np.array(counts, dtype=np.float64)
-    if counts.sum() == 0:
-        sys.exit(f"ERROR: No images found in {data_dir}. Expected subfolders: {CLASS_NAMES}")
-    total = counts.sum()
-    weights = total / (NUM_CLASSES * counts + 1e-6)  # Avoid division by zero
-    class_weight = {i: w for i, w in enumerate(weights)}
-    print(f"\nClass counts : {dict(zip(CLASS_NAMES, counts.astype(int).tolist()))}")
+def compute_class_weights(training_labels):
+    """Compute inverse-frequency weights using only the training partition."""
+    counts = np.bincount(training_labels, minlength=NUM_CLASSES).astype(np.float64)
+    missing = [name for name, count in zip(CLASS_NAMES, counts) if count == 0]
+    if missing:
+        sys.exit(f"ERROR: The training split has no examples for class(es): {missing}")
+    weights = counts.sum() / (NUM_CLASSES * counts)
+    class_weight = {i: weight for i, weight in enumerate(weights)}
+    print(f"\nTraining class counts : {dict(zip(CLASS_NAMES, counts.astype(int).tolist()))}")
     print(f"Class weights: {class_weight}\n")
     return class_weight
 
@@ -128,9 +141,9 @@ def build_model(trainable_base: bool = False):
             layer.trainable = False
 
     inputs = keras.Input(shape=(*IMG_SIZE, 3))
-    # MobileNetV2 expects pixels in [-1, 1]
-    x = keras.applications.mobilenet_v2.preprocess_input(inputs)
-    x = data_augmentation(x)
+    # Augment RGB pixels in [0, 255] before mapping to MobileNetV2's [-1, 1] range.
+    x = data_augmentation(inputs)
+    x = keras.applications.mobilenet_v2.preprocess_input(x)
     x = base(x, training=False)  # keep BN in inference mode
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(0.3)(x)
@@ -157,14 +170,17 @@ def evaluate_on_test(model, test_ds, class_names):
     print("\n" + "=" * 60)
     print("TEST SET EVALUATION")
     print("=" * 60)
-    report = classification_report(y_true, y_pred, target_names=class_names, digits=4)
+    report = classification_report(
+        y_true, y_pred, labels=range(len(class_names)),
+        target_names=class_names, digits=4, zero_division=0,
+    )
     print(report)
 
     test_acc = np.mean(y_true == y_pred)
     print(f"Overall test accuracy: {test_acc:.4f}")
 
     # Confusion matrix
-    cm = confusion_matrix(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=range(len(class_names)))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
     fig, ax = plt.subplots(figsize=(6, 5))
     disp.plot(ax=ax, cmap="Blues", colorbar=True)
@@ -196,7 +212,9 @@ def main():
             )
 
     # Load data
-    train_ds, val_ds, test_ds, class_names = load_datasets(args.data_dir, args.batch_size)
+    train_ds, val_ds, test_ds, class_names, train_labels = load_datasets(
+        args.data_dir, args.batch_size
+    )
 
     # Prefetch for performance
     AUTOTUNE = tf.data.AUTOTUNE
@@ -204,7 +222,7 @@ def main():
     val_ds = val_ds.prefetch(AUTOTUNE)
     test_ds = test_ds.prefetch(AUTOTUNE)
 
-    class_weight = compute_class_weights(args.data_dir)
+    class_weight = compute_class_weights(train_labels)
 
     # Phase 1: Train classifier head
     print("\n" + "=" * 60)
